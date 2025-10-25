@@ -14,4 +14,5 @@ const interval = setInterval(() => {
     clearInterval(interval);
   }
 }, 1000);
+process.exit(0);
 
