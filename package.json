@@ -1,0 +1,14 @@
+{
+  "name": "go-tui-npm-wrapper",
+  "version": "1.0.0",
+  "description": "Example project for Go TUI wrapper around npm scripts",
+  "scripts": {
+    "build": "node -e \"console.log('🛠️ Build is running...')\"",
+    "test": "node -e \"console.log('🧪 Tests are running...')\"",
+    "start": "node -e \"console.log('🚀 App is starting...')\"",
+    "lint": "node -e \"console.log('🧹 Linting the code...')\""
+  },
+  "author": "",
+  "license": "MIT"
+}
+
