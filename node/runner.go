@@ -22,7 +22,7 @@ func RunNodeScript(ch chan tea.Msg, name string) tea.Cmd {
 		lastOffset = 0
 		_ = os.Remove(logPath)
 
-		cmd := exec.Command("npm", "run", name)
+		cmd := exec.Command("stdbuf", "-oL", "npm", "run", name)
 
 		logFile, err := os.Create(logPath)
 		if err != nil {
@@ -46,6 +46,7 @@ func RunNodeScript(ch chan tea.Msg, name string) tea.Cmd {
 			// небольшой буфер, чтобы все данные успели попасть в файл
 			time.Sleep(200 * time.Millisecond)
 			ch <- msg.NodeDone{}
+			close(ch)
 		}()
 
 		// горутина: tail-подобное чтение лога
@@ -54,6 +55,7 @@ func RunNodeScript(ch chan tea.Msg, name string) tea.Cmd {
 				// если процесса уже нет и файл не растёт — завершить чтение цикла
 				f, err := os.Open(logPath)
 				if err != nil {
+					f.Close()
 					time.Sleep(200 * time.Millisecond)
 					continue
 				}

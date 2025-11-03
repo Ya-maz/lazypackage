@@ -8,7 +8,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// normal !!!
 func main() {
 	p := tea.NewProgram(ui.InitialModel())
 

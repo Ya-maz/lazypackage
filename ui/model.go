@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"cli/node"
 	"cli/msg"
+	"cli/node"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,7 +14,7 @@ import (
 type menu struct {
 	scripts  map[string]string // список npm команд
 	keys     []string
-	symbols   map[string]string // список npm команд
+	symbols  map[string]string // список npm команд
 	cursor   int               // какая команда выбрана
 	selected string            // что выбрал пользователь
 }
@@ -27,7 +27,6 @@ type model struct {
 	menu
 }
 
-
 // initial model (channel assigned later)
 func InitialModel() model {
 	scripts := node.ReadScriptsFromPackageJSON()
@@ -37,7 +36,7 @@ func InitialModel() model {
 		keys = append(keys, k)
 	}
 
-    ch := make(chan tea.Msg)
+	ch := make(chan tea.Msg)
 
 	// ИСПРАВЛЕНО: Сортируем ключи для стабильного порядка
 	sort.Strings(keys)
@@ -48,7 +47,7 @@ func InitialModel() model {
 		menu: menu{
 			scripts:  scripts,
 			keys:     keys, // Сохраняем отсортированный список
-			symbols:   symbols,
+			symbols:  symbols,
 			cursor:   0,
 			selected: "",
 		},
@@ -93,7 +92,10 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter", "l":
 				m.selected = m.keys[m.cursor]
 				m.screen = "finished"
-				return m, node.RunNodeScript(m.ch, m.selected)
+				return m, tea.Batch(
+					node.RunNodeScript(m.ch, m.selected),
+					node.ReadNextLine(m.ch),
+				)
 			}
 		case "finished":
 			switch message.String() {
