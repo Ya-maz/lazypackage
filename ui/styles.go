@@ -52,9 +52,7 @@ var (
 			BorderForeground(lipgloss.Color(Blue)). // Рамка — яркий синий акцент
 		// Background(lipgloss.Color(Background)).
 		Padding(1, 2).
-		Margin(1).
-		Width(50).
-		Height(15)
+		Margin(1)
 
 	titleStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(Blue)). // Яркий синий заголовок

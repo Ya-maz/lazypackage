@@ -9,106 +9,83 @@ import (
 	"strings"
 	"time"
 
+	"github.com/creack/pty"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// глобальная переменная для позиции — сбрасывается при старте
-var lastOffset int64 = 0
-
-func RunNodeScript(ch chan tea.Msg, name string) tea.Cmd {
+func RunNodeScript(ch chan tea.Msg, inputCh chan string, name string) tea.Cmd {
 	return func() tea.Msg {
+		// Мы больше не полагаемся на temp.log для UI, 
+		// но можем продолжать писать туда для истории если нужно.
 		logPath := "temp.log"
-
-		lastOffset = 0
 		_ = os.Remove(logPath)
+		logFile, _ := os.Create(logPath)
+		defer logFile.Close()
 
-		cmd := exec.Command("stdbuf", "-oL", "npm", "run", name)
-
-		logFile, err := os.Create(logPath)
+		c := exec.Command("npm", "run", name)
+		
+		// Запуск через PTY
+		ptmx, err := pty.Start(c)
 		if err != nil {
-			return msg.NodeErr("cannot create log file: " + err.Error())
+			return msg.NodeErr("failed to start pty: " + err.Error())
 		}
+		defer func() { _ = ptmx.Close() }()
 
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-
-		if err := cmd.Start(); err != nil {
-			logFile.Close()
-			return msg.NodeErr("failed to start process: " + err.Error())
-		}
-
-		// горутина: ждём завершения процесса и уведомим модель
-		go func() {
-			cmd.Wait()
-			// даём ОС записать остаток, затем закрываем файл
-			logFile.Sync()
-			logFile.Close()
-			// небольшой буфер, чтобы все данные успели попасть в файл
-			time.Sleep(200 * time.Millisecond)
-			ch <- msg.NodeDone{}
-			close(ch)
+		// Копируем вывод PTY в лог-файл (опционально)
+		go func() { 
+			_, _ = io.Copy(logFile, ptmx) 
 		}()
 
-		// горутина: tail-подобное чтение лога
+		// Канал для сигнала о завершении
+		processDone := make(chan bool)
+
+		go func() {
+			_ = c.Wait()
+			processDone <- true
+		}()
+
+		// Горутина для записи ВВОДА из TUI в процесс
 		go func() {
 			for {
-				// если процесса уже нет и файл не растёт — завершить чтение цикла
-				f, err := os.Open(logPath)
-				if err != nil {
-					f.Close()
-					time.Sleep(200 * time.Millisecond)
-					continue
+				data, ok := <-inputCh
+				if !ok {
+					return
 				}
-
-				fi, err := f.Stat()
-				if err != nil {
-					f.Close()
-					time.Sleep(200 * time.Millisecond)
-					continue
-				}
-
-				// ничего нового
-				if fi.Size() <= lastOffset {
-					f.Close()
-					// если процесс завершился и файл не растёт — выйти из цикла
-					// но чтобы узнать это, лучше смотреть на nodeDoneMsg в Update (не здесь)
-					time.Sleep(200 * time.Millisecond)
-					continue
-				}
-
-				// переместимся в позицию lastOffset
-				_, _ = f.Seek(lastOffset, io.SeekStart)
-				reader := bufio.NewReader(f)
-
-				for {
-					line, err := reader.ReadString('\n')
-					if line != "" {
-						trimmed := strings.TrimRight(line, "\r\n")
-						ch <- msg.NodeLine(trimmed)
-						// обновляем offset на длину считанной строки
-						lastOffset += int64(len(line))
-					}
-					if err != nil {
-						if err == io.EOF {
-							// прочитали всё, закрываем файл и продолжим внешний цикл
-							break
-						} else {
-							// непредвиденная ошибка — уведомим модель и остановим читатель
-							ch <- msg.NodeErr("read error: " + err.Error())
-							f.Close()
-							return
-						}
-					}
-				}
-
-				f.Close()
-				// небольшой sleep, чтобы не дергать диск слишком часто
-				time.Sleep(200 * time.Millisecond)
+				_, _ = ptmx.Write([]byte(data))
 			}
+		}()
+
+		// Читаем из PTY и шлем в модель ЧАНКАМИ (не строками)
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := ptmx.Read(buf)
+				if n > 0 {
+					// Отправляем как сырые данные
+					ch <- msg.NodeData(string(buf[:n]))
+				}
+				if err != nil {
+					break
+				}
+			}
+		}()
+
+		// Ждем завершения
+		go func() {
+			<-processDone
+			// Небольшая задержка чтобы вычитать последние байты
+			time.Sleep(100 * time.Millisecond)
+			close(ch)
 		}()
 
 		return nil
 	}
+}
+
+// Теперь эта функция не нужна для основного потока, так как мы читаем напрямую из PTY
+// Но оставим для обратной совместимости или удалим позже
+func readRemaining(logPath string, ch chan<- tea.Msg) {
+	// ... (старый код)
 }
 
 func ReadNextLine(ch <-chan tea.Msg) tea.Cmd {
