@@ -5,7 +5,6 @@ import (
 	"cli/node"
 	"fmt"
 	"sort"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -31,8 +30,6 @@ type Stage struct {
 // model stores output lines and the current navigation state
 type model struct {
 	lines    []string
-	ch       chan tea.Msg
-	inputCh  chan string
 	screen   string // "menu" or "execution"
 	stack    []Stage
 	selected string // Name of the script currently running
@@ -86,11 +83,8 @@ func InitialModel() model {
 		}
 	}
 
-	ch := make(chan tea.Msg)
-
 	return model{
 		lines:  []string{},
-		ch:     ch,
 		stack:  []Stage{mainStage},
 		screen: "menu",
 	}
@@ -102,103 +96,21 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
-	case msg.NodeData:
-		data := string(message)
-
-		// 1. Нормализуем CRLF -> LF, чтобы \r в конце строки не затирал её содержимое
-		data = strings.ReplaceAll(data, "\r\n", "\n")
-
-		parts := strings.Split(data, "\n")
-		
-		if len(m.lines) == 0 {
-			m.lines = append(m.lines, "")
-		}
-
-		// Обрабатываем первую часть (дополнение текущей строки)
-		processChunk := func(s string) string {
-			if strings.Contains(s, "\r") {
-				// Если встретили \r, берем всё, что после последнего \r
-				// Это симулирует перезапись строки
-				rParts := strings.Split(s, "\r")
-				return rParts[len(rParts)-1]
-			}
-			return s
-		}
-		
-		firstPart := parts[0]
-		if strings.Contains(firstPart, "\r") {
-             // Если в первой части есть \r, значит мы перезаписываем текущую строку
-             // Но тут есть нюанс: если \r в начале, то мы затираем старое.
-             // Если \r в середине "abc\rdef", то мы хотим получить "def".
-             // Моя простая логика: \r - это "отбросить всё что было до".
-             m.lines[len(m.lines)-1] = processChunk(firstPart)
-		} else {
-             m.lines[len(m.lines)-1] += firstPart
-		}
-
-		// Обрабатываем остальные части (новые строки)
-		for i := 1; i < len(parts); i++ {
-			lineContent := parts[i]
-			// Если новая строка содержит \r, применяем ту же логику "последнего выжившего"
-			finalContent := processChunk(lineContent)
-			m.lines = append(m.lines, finalContent)
-		}
-		
-		return m, node.ReadNextLine(m.ch)
-
-	case msg.NodeLine:
-		m.lines = append(m.lines, string(message))
-		return m, node.ReadNextLine(m.ch)
-
+	
 	case msg.NodeDone:
-		m.lines = append(m.lines, successStyle.Render("✅ Process finished!"))
-		if m.inputCh != nil {
-			close(m.inputCh)
-			m.inputCh = nil
-		}
+		m.screen = "menu"
+		m.lines = append(m.lines, successStyle.Render(fmt.Sprintf("✅ Script '%s' finished!", m.selected)))
+		// Optionally trigger a redraw or similar if needed, but bubbletea handles text updates
 		return m, nil
 
 	case msg.NodeErr:
-		m.lines = append(m.lines, errorStyle.Render(fmt.Sprintf("❌ Error: %s", string(message))))
+		m.screen = "menu"
+		m.lines = append(m.lines, errorStyle.Render(fmt.Sprintf("❌ Script '%s' failed: %s", m.selected, string(message))))
 		return m, nil
 
 	case tea.KeyMsg:
+		// If execution is transitioning, ignore keys
 		if m.screen == "execution" {
-			keyStr := message.String()
-			switch keyStr {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "backspace", "esc":
-				m.screen = "menu"
-				m.lines = []string{}
-				if m.inputCh != nil {
-					close(m.inputCh)
-					m.inputCh = nil
-				}
-				return m, nil
-			default:
-				if m.inputCh != nil {
-					toSend := keyStr
-					switch keyStr {
-					case "enter":
-						toSend = "\r"
-					case "up", "k":
-						toSend = "\x1b[A"
-					case "down", "j":
-						toSend = "\x1b[B"
-					case "right", "l":
-						toSend = "\x1b[C"
-					case "left", "h":
-						toSend = "\x1b[D"
-					}
-					
-					// Non-blocking send to avoid hanging UI if process is busy
-					select {
-					case m.inputCh <- toSend:
-					default:
-					}
-				}
-			}
 			return m, nil
 		}
 
@@ -245,12 +157,17 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if selectedOpt.Script != "" {
 				m.selected = selectedOpt.Script
 				m.screen = "execution"
-				m.ch = make(chan tea.Msg)
-				m.inputCh = make(chan string, 100)
-				return m, tea.Batch(
-					node.RunNodeScript(m.ch, m.inputCh, m.selected),
-					node.ReadNextLine(m.ch),
-				)
+				
+				// Get the exec.Cmd configured for the script
+				c := node.GetNodeCommand(m.selected)
+				
+				// Execute using tea.ExecProcess which manages terminal ownership
+				return m, tea.ExecProcess(c, func(err error) tea.Msg {
+					if err != nil {
+						return msg.NodeErr(err.Error())
+					}
+					return msg.NodeDone{}
+				})
 			}
 		}
 	}
@@ -258,44 +175,9 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	title := titleStyle.Render("Node Process Output")
-
 	if m.screen == "execution" {
-		subtitle := subTitleStyle.Render("Running script: " + m.selected)
-		
-		// Find the script description if possible (hacky for now, ideally stored in model)
-		scriptCmd := ""
-		if len(m.stack) > 0 {
-			for _, opt := range m.stack[len(m.stack)-1].Options {
-				if opt.Script == m.selected {
-					scriptCmd = opt.Description
-					break
-				}
-			}
-		}
-		
-		selectedScript := runningScriptTextStyle.Render("> " + scriptCmd)
-		
-		// Truncate logs to last 20 lines
-		displayLines := m.lines
-		if len(displayLines) > 20 {
-			displayLines = displayLines[len(displayLines)-20:]
-		}
-		
-		allLogs := strings.Join(displayLines, "\n")
-		logstring := itemTextStyle.Render(allLogs)
-
-		content := lipgloss.JoinVertical(lipgloss.Left,
-			title,
-			"",
-			subtitle,
-			selectedScript,
-			"",
-			logstring,
-			"",
-			hintStyle.Render("q/ctrl+c: quit | esc: back to menu"),
-		)
-		return boxStyle.Render(content)
+		// This text might briefly appear before tea.ExecProcess takes over terminal
+		return "\n  🚀 Launching " + m.selected + "...\n"
 	}
 
 	// Render current stage
@@ -305,7 +187,7 @@ func (m model) View() string {
 	}
 	currentStage := m.stack[currentStageIdx]
 
-	title = titleStyle.Render(currentStage.Title)
+	title := titleStyle.Render(currentStage.Title)
 	subtitle := subTitleStyle.Render(currentStage.Subtitle)
 
 	items := []string{}
@@ -327,7 +209,20 @@ func (m model) View() string {
 		"",
 	}
 	contentLines = append(contentLines, items...)
-	contentLines = append(contentLines, "", hintStyle.Render(hint))
+	
+	// Show recent status messages at the bottom
+	if len(m.lines) > 0 {
+		contentLines = append(contentLines, "", subTitleStyle.Render("Last run status:"))
+		
+		// Show last 3 lines
+		start := len(m.lines) - 3
+		if start < 0 { start = 0 }
+		for _, l := range m.lines[start:] {
+			contentLines = append(contentLines, l)
+		}
+	}
+	
+	contentLines = append(contentLines, "", hintStyle.Render("q/ctrl+c: quit | esc: back | enter: select"))
 
 	content := lipgloss.JoinVertical(lipgloss.Left, contentLines...)
 	return boxStyle.Render(content)
