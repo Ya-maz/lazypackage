@@ -1,7 +1,7 @@
 package main
 
 import (
-	"cli/ui"
+	"lazypackage/ui"
 	"fmt"
 	"os"
 

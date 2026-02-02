@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"cli/msg"
-	"cli/node"
+	"lazypackage/msg"
+	"lazypackage/node"
 	"fmt"
 	"sort"
 
