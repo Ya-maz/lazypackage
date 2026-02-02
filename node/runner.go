@@ -1,12 +1,9 @@
 package node
 
 import (
-	"bufio"
 	"cli/msg"
-	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/creack/pty"
@@ -29,12 +26,8 @@ func RunNodeScript(ch chan tea.Msg, inputCh chan string, name string) tea.Cmd {
 		if err != nil {
 			return msg.NodeErr("failed to start pty: " + err.Error())
 		}
-		defer func() { _ = ptmx.Close() }()
-
-		// Копируем вывод PTY в лог-файл (опционально)
-		go func() { 
-			_, _ = io.Copy(logFile, ptmx) 
-		}()
+		// НЕ закрываем ptmx здесь через defer, иначе он закроется сразу же после выхода из функции,
+		// а горутины еще работают! Закроем его позже, когда процесс завершится.
 
 		// Канал для сигнала о завершении
 		processDone := make(chan bool)
@@ -55,16 +48,20 @@ func RunNodeScript(ch chan tea.Msg, inputCh chan string, name string) tea.Cmd {
 			}
 		}()
 
-		// Читаем из PTY и шлем в модель ЧАНКАМИ (не строками)
+		// Читаем из PTY, пишем в лог и шлем в модель ЧАНКАМИ
 		go func() {
 			buf := make([]byte, 1024)
 			for {
 				n, err := ptmx.Read(buf)
 				if n > 0 {
-					// Отправляем как сырые данные
-					ch <- msg.NodeData(string(buf[:n]))
+					chunk := buf[:n]
+					// Пишем в лог-файл (опционально, для дебага)
+					_, _ = logFile.Write(chunk)
+					// Отправляем в UI как сырые данные
+					ch <- msg.NodeData(string(chunk))
 				}
 				if err != nil {
+					// EOF или ошибка PTY (например, закрылся master)
 					break
 				}
 			}
@@ -73,8 +70,9 @@ func RunNodeScript(ch chan tea.Msg, inputCh chan string, name string) tea.Cmd {
 		// Ждем завершения
 		go func() {
 			<-processDone
-			// Небольшая задержка чтобы вычитать последние байты
+			// Небольшая задержка чтобы вычитать последние байты, если ридер еще не отвалился
 			time.Sleep(100 * time.Millisecond)
+			_ = ptmx.Close() // Вот теперь можно закрывать
 			close(ch)
 		}()
 

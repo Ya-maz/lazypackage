@@ -32,6 +32,7 @@ type Stage struct {
 type model struct {
 	lines    []string
 	ch       chan tea.Msg
+	inputCh  chan string
 	screen   string // "menu" or "execution"
 	stack    []Stage
 	selected string // Name of the script currently running
@@ -49,9 +50,6 @@ func InitialModel() model {
 		Cursor:   0,
 	}
 
-	// For demonstration, let's group some scripts if they exist
-	// e.g., if there are multiple test scripts, we could nest them
-	// For simplicity now, we just populate the main menu
 	keys := make([]string, 0, len(scripts))
 	for k := range scripts {
 		keys = append(keys, k)
@@ -63,26 +61,22 @@ func InitialModel() model {
 			Name:        k,
 			Icon:        symbols[k],
 			Description: scripts[k],
-			Script:      k, // By default, everything is a script
+			Script:      k,
 		})
 	}
 
 	// Example of nesting: If we have "test", let's make it a sub-menu instead
-	// (Check if "test", "lint", "build" etc exist to simulate nested questions)
-	// This is just to WOO the user as requested.
 	if _, ok := scripts["test"]; ok {
-		// Mocking a sub-menu for tests
 		testSubStage := Stage{
 			Title:    "Test Suite",
 			Subtitle: "Which tests to run?",
 			Options:  []Option{
 				{Name: "Run All Tests", Icon: "🧪", Script: "test"},
 				{Name: "Run Lint", Icon: "🧹", Script: "lint"},
-				{Name: "Back to Main Menu", Icon: "⬅️", SubStage: nil}, // Special case for back handle
+				{Name: "Back to Main Menu", Icon: "⬅️", SubStage: nil},
 			},
 		}
 		
-		// Update "test" option in main menu to lead to sub-menu
 		for i, opt := range mainStage.Options {
 			if opt.Name == "test" {
 				mainStage.Options[i].Script = ""
@@ -108,12 +102,60 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
+	case msg.NodeData:
+		data := string(message)
+
+		// 1. Нормализуем CRLF -> LF, чтобы \r в конце строки не затирал её содержимое
+		data = strings.ReplaceAll(data, "\r\n", "\n")
+
+		parts := strings.Split(data, "\n")
+		
+		if len(m.lines) == 0 {
+			m.lines = append(m.lines, "")
+		}
+
+		// Обрабатываем первую часть (дополнение текущей строки)
+		processChunk := func(s string) string {
+			if strings.Contains(s, "\r") {
+				// Если встретили \r, берем всё, что после последнего \r
+				// Это симулирует перезапись строки
+				rParts := strings.Split(s, "\r")
+				return rParts[len(rParts)-1]
+			}
+			return s
+		}
+		
+		firstPart := parts[0]
+		if strings.Contains(firstPart, "\r") {
+             // Если в первой части есть \r, значит мы перезаписываем текущую строку
+             // Но тут есть нюанс: если \r в начале, то мы затираем старое.
+             // Если \r в середине "abc\rdef", то мы хотим получить "def".
+             // Моя простая логика: \r - это "отбросить всё что было до".
+             m.lines[len(m.lines)-1] = processChunk(firstPart)
+		} else {
+             m.lines[len(m.lines)-1] += firstPart
+		}
+
+		// Обрабатываем остальные части (новые строки)
+		for i := 1; i < len(parts); i++ {
+			lineContent := parts[i]
+			// Если новая строка содержит \r, применяем ту же логику "последнего выжившего"
+			finalContent := processChunk(lineContent)
+			m.lines = append(m.lines, finalContent)
+		}
+		
+		return m, node.ReadNextLine(m.ch)
+
 	case msg.NodeLine:
 		m.lines = append(m.lines, string(message))
 		return m, node.ReadNextLine(m.ch)
 
 	case msg.NodeDone:
 		m.lines = append(m.lines, successStyle.Render("✅ Process finished!"))
+		if m.inputCh != nil {
+			close(m.inputCh)
+			m.inputCh = nil
+		}
 		return m, nil
 
 	case msg.NodeErr:
@@ -122,18 +164,44 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.screen == "execution" {
-			switch message.String() {
-			case "q", "ctrl+c":
+			keyStr := message.String()
+			switch keyStr {
+			case "ctrl+c":
 				return m, tea.Quit
-			case "backspace", "esc": // Allow going back to menu after execution?
+			case "backspace", "esc":
 				m.screen = "menu"
 				m.lines = []string{}
+				if m.inputCh != nil {
+					close(m.inputCh)
+					m.inputCh = nil
+				}
 				return m, nil
+			default:
+				if m.inputCh != nil {
+					toSend := keyStr
+					switch keyStr {
+					case "enter":
+						toSend = "\r"
+					case "up", "k":
+						toSend = "\x1b[A"
+					case "down", "j":
+						toSend = "\x1b[B"
+					case "right", "l":
+						toSend = "\x1b[C"
+					case "left", "h":
+						toSend = "\x1b[D"
+					}
+					
+					// Non-blocking send to avoid hanging UI if process is busy
+					select {
+					case m.inputCh <- toSend:
+					default:
+					}
+				}
 			}
 			return m, nil
 		}
 
-		// Menu navigation
 		currentStageIdx := len(m.stack) - 1
 		if currentStageIdx < 0 {
 			return m, tea.Quit
@@ -155,7 +223,6 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "backspace", "esc", "h":
-			// Go back to previous stage
 			if len(m.stack) > 1 {
 				m.stack = m.stack[:len(m.stack)-1]
 			}
@@ -163,7 +230,6 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter", "l":
 			selectedOpt := currentStage.Options[currentStage.Cursor]
 			
-			// Option 1: It's a "Back" button (manual)
 			if selectedOpt.Name == "Back to Main Menu" || (selectedOpt.SubStage == nil && selectedOpt.Script == "") {
 				if len(m.stack) > 1 {
 					m.stack = m.stack[:len(m.stack)-1]
@@ -171,19 +237,18 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			// Option 2: Transition to SubStage
 			if selectedOpt.SubStage != nil {
 				m.stack = append(m.stack, *selectedOpt.SubStage)
 				return m, nil
 			}
 
-			// Option 3: Run Script
 			if selectedOpt.Script != "" {
 				m.selected = selectedOpt.Script
 				m.screen = "execution"
-				m.ch = make(chan tea.Msg) // Create a fresh channel for this run
+				m.ch = make(chan tea.Msg)
+				m.inputCh = make(chan string, 100)
 				return m, tea.Batch(
-					node.RunNodeScript(m.ch, m.selected),
+					node.RunNodeScript(m.ch, m.inputCh, m.selected),
 					node.ReadNextLine(m.ch),
 				)
 			}
