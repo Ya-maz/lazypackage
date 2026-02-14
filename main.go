@@ -1,8 +1,8 @@
 package main
 
 import (
-	"lazypackage/ui"
 	"fmt"
+	"lazypackage/ui"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"

@@ -87,5 +87,3 @@ var (
 	// константы
 	hint = "↑↓(jk) navigate | enter(l) select | q(h) quit"
 )
-
-
